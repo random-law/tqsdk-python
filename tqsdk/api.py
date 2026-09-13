@@ -793,6 +793,79 @@ class TqApi(TqBaseApi):
         # 判断用户是否指定了 chart_id（参数）, 如果指定了，则一定会发送新的请求。
         if pack:
             self._send_pack(pack)
+    def unsubscribe_kline_serial(self, klines: Union[pd.DataFrame, str, List[str]],
+                                 duration_seconds: Optional[int] = None) -> None:
+        """
+        取消订阅K线序列，停止接收对应的行情数据更新
+
+        取消订阅后，对应的K线序列将不再随着时间推进自动更新，服务端也不会再推送相关行情数据。
+        之后可重新调用 get_kline_serial 再次订阅。
+
+        支持两种方式:
+        * 传入 get_kline_serial 返回的K线序列，取消订阅该序列
+        * 传入合约代码（单个或列表）及K线数据周期，取消订阅该合约（组合）对应周期的所有K线序列
+
+        Args:
+            klines (pandas.DataFrame/str/list of str): 需要取消订阅的K线序列（get_kline_serial 的返回值），\
+            或订阅时的合约代码（组合）
+
+            duration_seconds (int): [可选]K线数据周期，通过合约代码取消订阅时必须指定
+
+        Example::
+
+            # 订阅 SHFE.cu2012 的K线，之后取消订阅
+            from tqsdk import TqApi, TqAuth
+
+            api = TqApi(auth=TqAuth("快期账户", "账户密码"))
+            klines = api.get_kline_serial("SHFE.cu2012", 60)
+            ...
+            api.unsubscribe_kline_serial(klines)
+            # 或
+            api.unsubscribe_kline_serial("SHFE.cu2012", 60)
+        """
+        if isinstance(klines, pd.DataFrame):
+            serial = self._serials.get(id(klines), None)
+            if serial is None:
+                raise Exception("取消K线订阅失败: 传入的K线序列不存在或已取消订阅")
+            serials = [serial]
+        else:
+            if duration_seconds is None:
+                raise Exception("参数错误: 通过合约代码取消订阅时必须指定 duration_seconds")
+            symbols = [klines] if isinstance(klines, str) else list(klines)
+            dur_id = int(duration_seconds) * 1000000000
+            # 找出订阅了该合约（组合）及周期的所有K线序列
+            serials = [s for s in self._serials.values()
+                       if s["chart"]["duration"] == dur_id
+                       and set(s["chart"]["ins_list"].split(",")) == set(symbols)]
+            if not serials:
+                raise Exception("取消K线订阅失败: 未找到 %s (%d) 对应的K线订阅" % (symbols, duration_seconds))
+        for serial in serials:
+            self._unsubscribe_serial(serial)
+
+    def _unsubscribe_serial(self, serial) -> None:
+        """取消订阅一个K线序列（内部使用）"""
+        self._serials.pop(id(serial["df"]), None)
+        # 删除请求缓存，使之后再次调用 get_kline_serial 时能够重新发起订阅
+        for request, s in list(self._requests["klines"].items()):
+            if s is serial:
+                del self._requests["klines"][request]
+        chart = serial["chart"]
+        # 发送 ins_list 为空的 set_chart 指令通知服务器退订该 chart（断线重连后也不会重新订阅）
+        self._send_pack({
+            "aid": "set_chart",
+            "chart_id": chart["chart_id"],
+            "ins_list": "",
+            "duration": chart["duration"],
+        })
+        self._data["charts"].pop(chart["chart_id"], None)
+        # 如果没有其他K线序列引用同一份底层数据，则将内存中的K线数据一并删除
+        for root in serial["root"]:
+            if not any(root in s["root"] for s in self._serials.values()):
+                _get_obj(self._data, root["_path"][:-1]).pop(root["_path"][-1], None)
+        # 取消 df 关联的等待任务（序列尚未初始化完成时该任务仍在运行）
+        task = serial["df"].__dict__.get("_task")
+        if task is not None and not task.done():
+            task.cancel()
 
     # ----------------------------------------------------------------------
     @deprecated_chart_id("symbol", "data_length", "adj_type")
