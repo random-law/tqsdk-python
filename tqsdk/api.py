@@ -821,7 +821,7 @@ class TqApi(TqBaseApi):
             ...
             api.unsubscribe_kline_serial(klines)
             # 或
-            api.unsubscribe_kline_serial("SHFE.cu2012", 60)
+            api.unsubscribe_kline_serial("SHFE.cu2012", 60) 秒数
         """
         if isinstance(klines, pd.DataFrame):
             serial = self._serials.get(id(klines), None)
